@@ -60,6 +60,10 @@ const redisClient = new Redis({
 const memoryCache = new Map();
 const memoryScopeIndex = new Map(); // scope -> Set(keys)
 
+// In-flight request coalescing for msgpackCacheMiddleware's MISS path — see
+// its use below. key -> Promise<{ ok, body, rev }>.
+const inFlightBulk = new Map();
+
 const trackMemoryKey = (scope, key, ttlSeconds) => {
   if (!memoryScopeIndex.has(scope)) memoryScopeIndex.set(scope, new Set());
   memoryScopeIndex.get(scope).add(key);
@@ -320,6 +324,42 @@ msgpackCacheMiddleware = (ttlSeconds = 300, scopeFn = null, keyFn = null) => {
       return sendBuffered(body);
     }
 
+    // In-flight coalescing: two simultaneous misses for the same key
+    // (a second Render instance, or a direct fallback browser hitting
+    // this endpoint alongside the relay's own coalescer) previously both
+    // ran the full buildBulkPayload (Tournament+Round+Match+Group +
+    // getMatchDataBatch + getOverallForRound Mongo aggregation) and both
+    // wrote the cache. A concurrent miss now awaits the first attempt's
+    // result and reuses its exact buffer instead of re-running the
+    // controller. Falls through to a fresh attempt below if there was
+    // none in flight, or if the in-flight one ended in a non-2xx — never
+    // propagate someone else's error onto this request.
+    const existingInFlight = inFlightBulk.get(key);
+    if (existingInFlight) {
+      const result = await existingInFlight;
+      if (result.ok) {
+        setRevHeader(result.rev);
+        return sendBuffered(result.body);
+      }
+    }
+
+    let resolveInFlight;
+    const inFlightPromise = new Promise((resolve) => { resolveInFlight = resolve; });
+    inFlightBulk.set(key, inFlightPromise);
+    const clearInFlight = () => {
+      if (inFlightBulk.get(key) === inFlightPromise) inFlightBulk.delete(key);
+    };
+    // Safety net: if the controller never reaches res.json (an uncaught
+    // exception, an early response sent elsewhere in the chain), don't
+    // leave concurrent waiters hanging or the map entry leaked — 'close'
+    // fires after every response, successful or not. A no-op if res.json
+    // already resolved this (Promise.resolve is idempotent past the
+    // first call, clearInFlight checks identity before deleting).
+    res.on('close', () => {
+      clearInFlight();
+      resolveInFlight({ ok: false });
+    });
+
     res.json = function (data) {
       const ok = res.statusCode >= 200 && res.statusCode < 300;
       // See cacheMiddleware above for why this only caches on success.
@@ -334,6 +374,8 @@ msgpackCacheMiddleware = (ttlSeconds = 300, scopeFn = null, keyFn = null) => {
       }
       setRevHeader(rev);
       sendBuffered(body);
+      clearInFlight();
+      resolveInFlight({ ok, body, rev });
     };
 
     next();

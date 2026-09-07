@@ -12,7 +12,7 @@
 // NOT wired into npm start/CI.
 //   Run: node scripts/verify-protobuf-delta.js
 const { computeChangedPlayerFields } = require('../utils/matchTeamDiff');
-const { encodeProtobuf, toProtoTeam } = require('../utils/protobufCodec');
+const { encodeProtobuf, toProtoTeam, toProtoMatchDataPayload } = require('../utils/protobufCodec');
 const proto = require('../proto/overlay.pb.js').overlay;
 
 const results = [];
@@ -120,6 +120,24 @@ const firstTickPlayer = firstTickDecoded.teams[0].players[0];
 (firstTickPlayer.killNum === 2 && firstTickPlayer.health === 77 && firstTickPlayer.assists === 1)
   ? pass('First-tick (full) player: every field present with its real value, as before this change')
   : fail(`First-tick player missing/wrong fields: killNum=${firstTickPlayer.killNum}, health=${firstTickPlayer.health}, assists=${firstTickPlayer.assists}`);
+
+// --- 4. seq (dropped-delta gap detection) round-trips through the wire,
+//     and is genuinely absent (not 0) when the caller never stamped one ---
+const seqMapped = toProtoMatchDataPayload({ matchId: 'm1', teams: [], seq: 42 });
+const seqEncoded = proto.MatchDataPayload.encode(proto.MatchDataPayload.create(seqMapped)).finish();
+const seqDecoded = proto.MatchDataPayload.toObject(proto.MatchDataPayload.decode(seqEncoded), { defaults: true });
+seqDecoded.seq === 42
+  ? pass(`seq round-trips through encode/decode with its real value (got ${seqDecoded.seq})`)
+  : fail(`seq did not round-trip: got ${JSON.stringify(seqDecoded.seq)}, want 42`);
+
+const noSeqMapped = toProtoMatchDataPayload({ matchId: 'm1', teams: [] }); // no seq stamped
+const noSeqDecoded = proto.MatchDataPayload.toObject(
+  proto.MatchDataPayload.decode(proto.MatchDataPayload.encode(proto.MatchDataPayload.create(noSeqMapped)).finish()),
+  { defaults: true },
+);
+noSeqDecoded.seq == null
+  ? pass('seq is genuinely absent (not 0) when the caller never stamped one — additive/back-compat')
+  : fail(`seq should be absent when unset, got ${JSON.stringify(noSeqDecoded.seq)}`);
 
 console.log('\n=== PROTOBUF DELTA ROUND-TRIP VERIFICATION RESULTS ===');
 results.forEach((r) => console.log(r));

@@ -132,6 +132,39 @@ function pickFields(obj, fields) {
 }
 
 /* --------------------------------------------------------------------
+   OVERALL-STANDINGS PLAYER SLIM (independent of VIEW_PLAYER_TIER above)
+   --------------------------------------------------------------------
+   VIEW_PLAYER_TIER governs matchData slimming for a view, and until now
+   overallData reused that SAME map/function — but a view can need very
+   different fidelity on each side. LiveStats is the sharp case: it needs
+   FULL matchData (health/liveState/position — deliberately unlisted in
+   VIEW_PLAYER_TIER above) but its overall/standings side only ever reads
+   a handful of fields. Adding LiveStats to VIEW_PLAYER_TIER to slim its
+   overall side would have wrongly slimmed its matchData side too, since
+   slimmedMatchData below reads that same map. So this is a wholly
+   separate map + function that only ever touches slimmedOverallData.
+   Declared here (ahead of bulkViewSignature just below, which reads it)
+   rather than near slimOverallPlayersForView's own definition further
+   down, to avoid a TDZ reference-before-init at module load.
+
+   Field list traced against every real consumer: officialStandings.ts,
+   fraggerScore.ts, and every themed OverAllData/OverallFrags/Champions/
+   1stRunnerUp/2ndRunnerUp/EventMvp/LiveStats component across all themes.
+   Only `_id`/`uId`/`playerName`/`picUrl` (podium display + photo-map
+   lookups) and `killNum` (team-kill totals) are ever read off
+   overallData.teams[].players[] anywhere in the frontend — everything
+   else those consumers need comes from matchDatas, not overallData.
+-------------------------------------------------------------------- */
+const OVERALL_PLAYER_FIELDS = [...IDENTITY_PLAYER_FIELDS, 'killNum'];
+// Every view that touches overallData at all (VIEWS_NEEDING_OVERALL) gets
+// the same single slim tier — there's no meaningfully different fidelity
+// need across them (unlike VIEW_PLAYER_TIER's several matchData tiers).
+const OVERALL_VIEW_PLAYER_TIER = Object.fromEntries(
+  [...VIEWS_NEEDING_OVERALL].map((v) => [v, 'standings'])
+);
+const OVERALL_PLAYER_FIELD_TIERS = { standings: OVERALL_PLAYER_FIELDS };
+
+/* --------------------------------------------------------------------
    CACHE-KEY VIEW FOLDING
    --------------------------------------------------------------------
    buildBulkPayload's output depends on `view` ONLY through: the four
@@ -154,6 +187,7 @@ function bulkViewSignature(view) {
     VIEWS_NEEDING_MATCHES_LIST.has(view) ? 'l' : '-',
     VIEWS_NEEDING_ALL_MATCH_DATAS.has(view) ? 'a' : '-',
     VIEW_PLAYER_TIER[view] || 'full',
+    OVERALL_VIEW_PLAYER_TIER[view] || 'full',
     view === 'Achive' ? 'achive' : 'std',
   ].join('');
 }
@@ -211,6 +245,19 @@ function slimPlayersForView(teams, view) {
   return (teams || []).map(team => ({
     ...team,
     players: (team.players || []).map(p => pickFields(p, fields)),
+  }));
+}
+
+// Overall-standings counterpart to slimPlayersForView — see
+// OVERALL_VIEW_PLAYER_TIER's comment above for why this is a separate
+// map/function rather than reusing VIEW_PLAYER_TIER.
+function slimOverallPlayersForView(teams, view) {
+  const tierName = OVERALL_VIEW_PLAYER_TIER[view];
+  if (!tierName) return teams; // unlisted view — full fidelity
+  const fields = OVERALL_PLAYER_FIELD_TIERS[tierName];
+  return (teams || []).map((team) => ({
+    ...team,
+    players: (team.players || []).map((p) => pickFields(p, fields)),
   }));
 }
 
@@ -617,8 +664,12 @@ async function buildBulkPayload({ tournamentId, roundId, matchId, view = null, f
   const slimmedMatchData = (shouldSlimForView && matchData)
     ? { ...matchData, teams: slimPlayersForView(matchData.teams, view) }
     : matchData;
-  const slimmedOverallData = (shouldSlimForView && overallData)
-    ? { ...overallData, teams: slimPlayersForView(overallData.teams, view) }
+  // Independent gate from matchData's above — see OVERALL_VIEW_PLAYER_TIER's
+  // comment for why (LiveStats in particular needs full matchData but a
+  // slim overall side).
+  const shouldSlimOverallForView = !includeAll && !!OVERALL_VIEW_PLAYER_TIER[view];
+  const slimmedOverallData = (shouldSlimOverallForView && overallData)
+    ? { ...overallData, teams: slimOverallPlayersForView(overallData.teams, view) }
     : overallData;
 
   const currentMatchData = slimmedMatchData
@@ -686,4 +737,9 @@ module.exports = {
   getOverallForRound,
   hydrateMatchDataIdentity,
   updateDeadTeamList,
+  // Exported for scripts/verify-overall-slim.js — see OVERALL_VIEW_PLAYER_TIER's
+  // comment above.
+  slimOverallPlayersForView,
+  OVERALL_PLAYER_FIELDS,
+  OVERALL_VIEW_PLAYER_TIER,
 };

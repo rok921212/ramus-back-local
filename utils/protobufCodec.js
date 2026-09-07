@@ -98,10 +98,16 @@ function toProtoTeam(t) {
 }
 
 function toProtoMatchDataPayload(memoryMatch) {
-  return {
+  const out = {
     matchId: String(memoryMatch.matchId ?? ''),
     teams: (memoryMatch.teams || []).map(toProtoTeam).filter(Boolean),
   };
+  // Dropped-delta gap detection — see liveSeqByUserMatch's comment in
+  // pubgApiMatchData.controller.js. Optional field: undefined on any
+  // caller that doesn't stamp one (there are none left, but this stays
+  // additive/back-compat regardless).
+  if (memoryMatch.seq !== undefined) out.seq = toInt32(memoryMatch.seq);
+  return out;
 }
 
 function toProtoOverallDataPayload(overallPayload) {

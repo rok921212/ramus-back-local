@@ -705,6 +705,29 @@ function markUserInactiveForPolling(userId) {
 const lastMatchDataByUserMatch = {};
 const lastFingerprintByUserMatch = {}; // stores fingerprint PARTS arrays, not hashes
 
+// Monotonic per-(user,match) sequence number stamped onto every
+// liveMatchUpdate payload (dropped-delta detection). The matchData/
+// matchDataPositional room emits and the user-room emit are all
+// volatile:true — silently droppable under backpressure by design.
+// Without a seq, the client can't tell a legitimately-omitted player
+// (unchanged, correctly absent from a delta) apart from a delta that
+// never arrived at all — a gap right as a player dies/gets knocked left
+// the health bar frozen on their old state indefinitely (the "ghost
+// health bar" symptom). A seq gap tells the client to refetch instead.
+// Hydration sends (connect-time and joinRoundRoom) stamp the CURRENT
+// value via currentLiveSeq WITHOUT advancing it — they establish the
+// client's baseline, not a new tick. Cleaned up in evictLiveMatchKey
+// alongside the other per-cacheKey maps.
+const liveSeqByUserMatch = new Map();
+function nextLiveSeq(cacheKey) {
+  const seq = (liveSeqByUserMatch.get(cacheKey) || 0) + 1;
+  liveSeqByUserMatch.set(cacheKey, seq);
+  return seq;
+}
+function currentLiveSeq(cacheKey) {
+  return liveSeqByUserMatch.get(cacheKey) || 0;
+}
+
 // ─── liveMatchCache idle eviction ────────────────────────────────────────────
 // liveMatchCache and the five last*ByUserMatch maps above were never pruned:
 // every (user, match) pair seen since the process booted stayed resident for
@@ -736,6 +759,7 @@ function evictLiveMatchKey(cacheKey) {
   delete lastOverallFingerprintByUserMatch[cacheKey];
   delete lastOverallTeamsByUserMatch[cacheKey];
   delete lastDeadTeamIdsByUserMatch[cacheKey];
+  liveSeqByUserMatch.delete(cacheKey);
 }
 
 // socket.id -> userId, so disconnect can clean up the right entries
@@ -861,7 +885,7 @@ function startLiveMatchUpdater() {
           // location stripped to match the user:<id> delta stream (see
           // emitUpdates) — no dashboard consumer renders position off this
           // feed, they read it from the local :10086 PCOB feed.
-          socket.emit('liveMatchUpdate', encodeMsgpack({ ...fullMatch, teams: stripPositionalFields(fullMatch.teams), matchId: hydratedMatchId }));
+          socket.emit('liveMatchUpdate', encodeMsgpack({ ...fullMatch, teams: stripPositionalFields(fullMatch.teams), matchId: hydratedMatchId, seq: currentLiveSeq(cacheKey) }));
           console.log(c('dim', `[socket] user-room hydration -> ${socket.id} cacheKey=${cacheKey}`));
         }
       }
@@ -1064,6 +1088,16 @@ function startLiveMatchUpdater() {
     console.error(c('red', `[socket][registerRelay] handler FAILED for ${socket.id} after ${Date.now() - registerStartedAt}ms: ${err.message}`));
     ack({ ok: false, reason: 'internal error' });
   }
+});
+
+// Dedicated liveness probe — replaces reusing registerRelay as a 5s
+// keepalive (that cost a full DB-lookup-skip branch + 2 log lines per
+// relay per tick for no reason). No payload, no auth check, no DB, no
+// log: fetcher.rs's and hub.rs's watchdogs just need a cheap ack that the
+// socket is still alive. registerRelay itself is unchanged and still
+// fires on an actual (re)connect.
+socket.on('relayPing', (cb) => {
+  if (typeof cb === 'function') cb();
 });
 
     socket.on('totalPlayerList', (raw) => {
@@ -1374,7 +1408,7 @@ function startLiveMatchUpdater() {
         // — this is a one-shot catch-up send for a socket that has nothing
         // yet, so it must not be silently dropped under backpressure the
         // way a routine tick's delta safely can be.
-        const basePayload = { ...memoryMatch, matchId: String(selection.matchId) };
+        const basePayload = { ...memoryMatch, matchId: String(selection.matchId), seq: currentLiveSeq(cacheKey) };
         if (joinMatchDataPositional) {
           emitToRoomSplitByFormat(io, [socket.id], 'liveMatchUpdate', {
             protoMessageName: 'MatchDataPayload',
@@ -2049,6 +2083,12 @@ function startLiveMatchUpdater() {
             return;
           }
 
+          // One seq per actually-emitted tick (past the no-consumers gate
+          // above, so a skipped tick doesn't burn a number) — see
+          // liveSeqByUserMatch's comment. Shared by all three room/user
+          // emits below so a client can tell them apart from a genuine gap.
+          const seq = nextLiveSeq(cacheKey);
+
           // Team-level (+ player-level) delta since the last tick, reused by
           // every room below. First tick for this (user, match): lastData is
           // undefined, so computeChangedTeams returns the full roster — a
@@ -2074,7 +2114,7 @@ function startLiveMatchUpdater() {
               // the local :10086 PCOB feed, not from here. Kept as msgpack
               // (no client decode change); clients merge a partial teams[]
               // by id, so an absent field just keeps its last-known value.
-              const encoded = encodeMsgpack({ ...memoryMatch, teams: stripPositionalFields(changedTeams), matchId: String(selected.matchId) });
+              const encoded = encodeMsgpack({ ...memoryMatch, teams: stripPositionalFields(changedTeams), matchId: String(selected.matchId), seq });
               console.log(`[bw][emit] liveMatchUpdate (delta) -> ${userRoom}: sockets=${userTargets.length} teams=${changedTeams.length}/${memoryMatch.teams.length} bytes=${encoded.length}`);
               io.to(userTargets).volatile.emit('liveMatchUpdate', encoded);
               // Count this fan-out into [bw][rollup]'s ws_fanout — this
@@ -2102,7 +2142,7 @@ function startLiveMatchUpdater() {
               emitToRoomSplitByFormat(io, matchDataRoom, 'liveMatchUpdate', {
                 protoMessageName: 'MatchDataPayload',
                 mapToProto: toProtoMatchDataPayload,
-                data: { ...memoryMatch, teams: stripPositionalFields(changedTeams), matchId: String(selected.matchId) },
+                data: { ...memoryMatch, teams: stripPositionalFields(changedTeams), matchId: String(selected.matchId), seq },
                 volatile: true,
               });
             }
@@ -2114,7 +2154,7 @@ function startLiveMatchUpdater() {
               emitToRoomSplitByFormat(io, matchDataPositionalRoom, 'liveMatchUpdate', {
                 protoMessageName: 'MatchDataPayload',
                 mapToProto: toProtoMatchDataPayload,
-                data: { ...memoryMatch, teams: changedTeams, matchId: String(selected.matchId) },
+                data: { ...memoryMatch, teams: changedTeams, matchId: String(selected.matchId), seq },
                 volatile: true,
               });
             }
