@@ -30,6 +30,7 @@ const overallRoutes = require('./route/overall.route.js');
 
 const userRoutes = require('./route/User.route.js');
 const bulkRoutes = require('./route/Bulkpublic.route.js');
+const adminPanelRoutes = require('./route/adminPanel.route.js');
 
 const { cacheMiddleware } = require('./middleware/cache.js');
 
@@ -235,6 +236,10 @@ app.use((req, res, next) => {
 
 // --- REGISTER ROUTES ---
 app.use('/api/users', userRoutes);
+// Hidden admin panel. Additive surface — every route inside is behind
+// requireAdminPanel (panel cookie + existing Bearer JWT + User.isAdmin).
+// Mounted after the Bearer-JWT shim above so req.session.userId is populated.
+app.use('/api/admin-panel', adminPanelRoutes);
 app.use('/api', groupRoutes);
 // Mount matchRoutes before tournamentRoutes to handle nested routes
 app.use('/api', matchRoutes);

@@ -29,6 +29,14 @@ router.post(
   matchController.createMatchInRoundInTournament
 );
 
+// Caller's match count vs. their maxMatches cap (for the dashboard limit banner).
+// Declared BEFORE '/matches/:id' so "usage" isn't captured as an :id.
+router.get(
+  '/matches/usage',
+  requireAuth,
+  matchController.getMatchUsage
+);
+
 // Get match by ID
 router.get(
   '/matches/:id',

@@ -26,8 +26,14 @@ const config = {
   
   // Security
   ADMIN_CODE: envVars.ADMIN_CODE,
-  JWT_SECRET: envVars.JWT_SECRET || 'your-secret-key',
-  SESSION_SECRET: envVars.SESSION_SECRET || 'supersecretkey123',
+  // SECURITY: no fallback. The embedded config/env.config.js does NOT carry a
+  // JWT_SECRET, so `|| 'your-secret-key'` meant production tokens were signed
+  // with a publicly-known string (every JWT forgeable). Take it from the
+  // embedded config if present, otherwise from the real environment
+  // (.env is loaded by index.js / dotenv, Render injects its dashboard vars).
+  // Enforced as required below.
+  JWT_SECRET: envVars.JWT_SECRET || process.env.JWT_SECRET,
+  SESSION_SECRET: envVars.SESSION_SECRET || process.env.SESSION_SECRET, // legacy/unused (no express-session)
   
 // Database
   MONGODB_URI: envVars.MONGODB_URI || 'mongodb+srv://DEMON:1RpRCPfA2TIjcXXL@cluster0.znuinux.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0',
@@ -40,7 +46,7 @@ const config = {
 };
 
 // Validate required configuration
-const requiredConfigs = ['ADMIN_CODE', 'MONGODB_URI', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'];
+const requiredConfigs = ['ADMIN_CODE', 'JWT_SECRET', 'MONGODB_URI', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'];
 for (const key of requiredConfigs) {
   if (!config[key] && process.env.NODE_ENV !== 'test') {
     console.error(`❌ Missing required config: ${key}`);

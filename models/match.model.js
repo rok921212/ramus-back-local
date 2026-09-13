@@ -15,4 +15,8 @@ const matchSchema = new mongoose.Schema({
 // filters Match.find({tournamentId, roundId}) — was running unindexed.
 matchSchema.index({ tournamentId: 1, roundId: 1 });
 
+// Per-user match-count queries: the maxMatches limit check and the admin
+// overview aggregation both filter/group on userId.
+matchSchema.index({ userId: 1 });
+
 module.exports = mongoose.models.Match || mongoose.model('Match', matchSchema);

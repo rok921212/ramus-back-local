@@ -6,6 +6,17 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   isAdmin: { type: Boolean, default: false },
+  // "Sub-Admin" is purely a label + a home for a per-user match quota. It
+  // grants NO extra access (not the admin panel, not cross-account data) —
+  // a sub-admin is an ordinary dashboard user whose match creation is capped.
+  isSubAdmin: { type: Boolean, default: false },
+  // Max matches this account may create. 0 (or unset) = unlimited. Ignored
+  // entirely for full admins (isAdmin), who are always unlimited. Enforced in
+  // controller/match.controller.js#createMatchInRoundInTournament.
+  maxMatches: { type: Number, default: 0, min: 0 },
+  // Set on every successful loginUser (atomic $set, never via save()).
+  lastLoginAt: { type: Date },
+  loginCount: { type: Number, default: 0 },
   // Opaque token the desktop relay presents to prove which user it belongs
   // to over the socket connection (which carries no session cookie).
   // select: false keeps it out of normal find()/findById() results so it

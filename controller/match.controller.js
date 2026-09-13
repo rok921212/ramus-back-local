@@ -3,6 +3,7 @@ const Round = require('../models/round.model');
 const Tournament = require('../models/tournament.model');
 const MatchData = require('../models/matchData.model');
 const MatchSelection = require('../models/MatchSelection.model.js');
+const User = require('../models/User.model.js');
 
 const mongoose = require('mongoose');
 
@@ -46,6 +47,23 @@ const createMatchInRoundInTournament = async (req, res) => {
     const { tournamentId, roundId } = req.params;
     const round = await Round.findOne({ _id: roundId, createdBy: req.session.userId });
     if (!round) return res.status(404).json({ message: 'Round not found or not yours' });
+
+    // Per-user match quota. Full admins are always unlimited; maxMatches 0/unset
+    // = unlimited. Soft cap: two truly-concurrent creates could both pass the
+    // count — acceptable for a "you've reached the limit" prompt (a hard cap
+    // would need a counter doc / transaction like round.model's apiEnable index).
+    const owner = await User.findById(req.session.userId).select('isAdmin maxMatches').maxTimeMS(5000);
+    if (owner && !owner.isAdmin && owner.maxMatches > 0) {
+      const used = await Match.countDocuments({ userId: req.session.userId }).maxTimeMS(5000);
+      if (used >= owner.maxMatches) {
+        return res.status(403).json({
+          error: `You have reached the maximum match limit (${owner.maxMatches}).`,
+          code: 'MATCH_LIMIT',
+          used,
+          max: owner.maxMatches,
+        });
+      }
+    }
 
     let time = req.body.time ? convertTo12Hour(req.body.time) : undefined;
 
@@ -268,6 +286,28 @@ const saveCurrentMatchData = async (req, res) => {
   }
 };
 
+// How many matches the caller has created vs. their cap. Drives the
+// "maximum match limit" banner in the dashboard Navbar and the disabled
+// "Add Match" button, so the UI can warn BEFORE a create is attempted.
+const getMatchUsage = async (req, res) => {
+  try {
+    const user = await User.findById(req.session.userId).select('isAdmin maxMatches').maxTimeMS(5000);
+    if (!user) return res.status(401).json({ message: 'Not logged in' });
+
+    const unlimited = !!user.isAdmin || !user.maxMatches || user.maxMatches <= 0;
+    const used = await Match.countDocuments({ userId: req.session.userId }).maxTimeMS(5000);
+
+    return res.json({
+      used,
+      max: unlimited ? null : user.maxMatches,
+      unlimited,
+      limitReached: !unlimited && used >= user.maxMatches,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   createMatchInRoundInTournament,
   getMatchById,
@@ -278,4 +318,5 @@ module.exports = {
   deleteMatch,
   updateAllMatchesWithRoundGroups,
   saveCurrentMatchData,
+  getMatchUsage,
 };

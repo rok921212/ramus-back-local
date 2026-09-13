@@ -50,6 +50,14 @@ const loginUser = async (req, res) => {
     const isMatch = await user.matchPassword(password);
     if (!isMatch) return res.status(400).json({ message: "Invalid password" });
 
+    // Record the login. Atomic $set/$inc — deliberately NOT via user.save(),
+    // so the pre('save') password-hash hook is never re-triggered. Non-fatal:
+    // a failure here must not block the login. Surfaced in the admin overview.
+    User.updateOne(
+      { _id: user._id },
+      { $set: { lastLoginAt: new Date() }, $inc: { loginCount: 1 } }
+    ).catch(err => console.warn('[users] lastLoginAt update failed:', err.message));
+
     // The desktop relay has no session cookie to present over its socket
     // connection, so it authenticates with this separate opaque token
     // instead of a raw userId. Issue one lazily on first login.
