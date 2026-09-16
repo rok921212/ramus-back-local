@@ -711,7 +711,26 @@ async function getBulkData(req, res) {
     });
 
     if (!payload.tournamentData) {
-      return res.status(404).json({ error: 'Tournament not found' });
+      // A valid ObjectId that reads back empty isn't necessarily a real
+      // "doesn't exist" — a Mongoose reconnect blip (Render) or a read
+      // racing something can produce the same null for a real tournament.
+      // A disconnected DB is unambiguously transient; a connected-but-null
+      // read gets exactly one bounded re-check before we accept it as a
+      // genuine 404, so an actually-missing tournament still resolves fast.
+      const readyState = mongoose.connection.readyState;
+      if (readyState !== 1) {
+        console.warn('[bulk-404]', { tournamentId, roundId, readyState, retried: false, reason: 'db-not-connected' });
+        res.set('Retry-After', '2');
+        return res.status(503).json({ error: 'Backend temporarily unavailable' });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const retryTournament = await Tournament.findById(tournamentId).lean();
+      if (!retryTournament) {
+        console.warn('[bulk-404]', { tournamentId, roundId, readyState, retried: true, reason: 'tournament-not-found' });
+        return res.status(404).json({ error: 'Tournament not found' });
+      }
+      payload.tournamentData = retryTournament;
     }
 
     // Authoritative per-round revision. Rides in the body as
